@@ -403,6 +403,55 @@ regions:
 
 The transpiler (`.values/transpiler.yml`) receives this document under `data.values.inventory` and maps it to the fields expected by the service's `valuesSchema`.
 
+### Rendering for Older VCF Platform Versions (Backward Compatibility)
+
+A VCF Service built to take advantage of the latest VCF Platform capabilities may still need to install and run correctly alongside older VCF Platform versions. Detecting which platform version it's targeting - and rendering accordingly - is the responsibility of the VCF Service vendor, implemented as checks inside the bundle itself: either from the Inventory, or from an Installation UI plugin that checks against the VCF APIs, feeding the detection result in as an autowired user-input value that the service's own `config/` templates branch on.
+
+**1. Add a user-input value to the schema.** Add a property (e.g. `legacyPlatform`) to `package.yml`'s `valuesSchema`, defaulting to `false` so the schema assumes the current platform unless told otherwise - the same forward/backward-compatible defaulting convention used for [environment-aware Supervisor Service properties](../supervisor-services/carvel/environment-aware.md#step-a-declare-the-property). This is the slot both detection paths below write into, and it also remains available as a manual escape hatch if an administrator needs to override the detected value.
+
+**2. Autowire it from the Inventory.** The `regions[].supervisors[].version` field described above is populated by the Service Manager from live system state before your bundle runs at all - it's already known, so deriving `legacyPlatform` from it in `.values/transpiler.yml` means the administrator never has to answer "what version am I on?" manually:
+
+```yaml
+#@ load("@ytt:data", "data")
+
+#! Returns True when the target Supervisor predates the version that introduced
+#! the newer CR shape - used to pick which variant of the CR to render below.
+#@ def targets_legacy_platform():
+#@   supervisor_version = data.values.inventory.regions[0].supervisors[0].version
+#@   return supervisor_version.startswith("8.")
+#@ end
+
+---
+legacyPlatform: #@ targets_legacy_platform()
+```
+
+**3. Or autowire it from an Installation UI plugin.** For checks the Inventory doesn't expose - a VCF Automation capability rather than a Supervisor version, for example - an install-time UI plugin can query the relevant VCF APIs directly and set `legacyPlatform` on the administrator's behalf. The value still arrives through the same schema field as step 1; it's simply populated by the plugin instead of typed in by hand.
+
+**4. Branch the CR rendering on the resulting value.** Whichever path set it, consume the flag in `config/` with `#@ if/else` to pick the CR shape or the set of optional properties the target platform supports:
+
+```yaml
+#@ load("@ytt:data", "data")
+---
+apiVersion: services.vcfa.broadcom.com/v2
+kind: SupervisorService
+metadata:
+  labels:
+    services.vcfa.broadcom.com/name: arcturus
+spec:
+  #@ if data.values.legacyPlatform:
+  legacyConfiguration:
+    simpleMode: true
+  #@ else:
+  configuration:
+    persistence:
+      persistentVolumeClaim:
+        registry:
+          storageClass: #@ data.values.storageClass
+  #@ end
+```
+
+Render both branches locally with `ytt --strict` (see [Best Practices](#best-practices) below) before publishing, so a regression in the legacy branch doesn't only surface when a customer on an older platform installs the service.
+
 ---
 
 ## Best Practices
@@ -441,3 +490,5 @@ The transpiler (`.values/transpiler.yml`) receives this document under `data.val
 - [Filesystem Layout](filesystem-layout.md) - bundle and VCF Service tarball directory structure
 - [Extensions Overview](../extensions/element-types-overview.md) - all supported CR types
 - [Upgrade](upgrade.md) - post-installation lifecycle: upgrade, rollback, and deletion
+- [Supervisor Service Compatibility Checks](../supervisor-services/carvel/compatibility.md) - the equivalent platform-enforced version-constraint mechanism for Supervisor Services
+- [Environment-Aware Supervisor Services](../supervisor-services/carvel/environment-aware.md) - the defaulting convention this guide's backward-compatibility pattern is modeled on
